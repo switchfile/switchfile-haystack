@@ -17,7 +17,22 @@ pytestmark = [
 
 
 @pytest.mark.parametrize("store", [True, False])
-def test_live_conversion(tmp_path, store):
+def test_live_markdown(tmp_path, store):
+    path = tmp_path / "invoice.pdf"
+    path.write_bytes(table_pdf())
+
+    [document] = SwitchfileConverter(store=store, raise_on_failure=True).run(sources=[path])["documents"]
+
+    assert document.meta["file_path"] == "invoice.pdf"
+    assert document.meta["page_count"] == 1
+    assert document.meta["switchfile_conversion_id"]
+    assert "Invoice" in document.content
+    assert "Widget" in document.content
+    assert "\n| " in document.content
+
+
+@pytest.mark.parametrize("store", [True, False])
+def test_live_table_documents(tmp_path, store):
     path = tmp_path / "invoice.pdf"
     path.write_bytes(table_pdf())
 
@@ -26,10 +41,7 @@ def test_live_conversion(tmp_path, store):
     ]
 
     main = documents[0]
-    assert main.meta["file_path"] == "invoice.pdf"
     assert main.meta["page_count"] == 1
-    assert main.meta["switchfile_conversion_id"]
-    assert "Invoice" in main.content
     assert "Widget" in main.content
     tables = documents[1:]
     assert tables, main.content

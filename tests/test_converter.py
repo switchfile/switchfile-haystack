@@ -16,25 +16,28 @@ from haystack_integrations.components.converters.switchfile import SwitchfileCon
 TEST_FILES = Path(__file__).parent / "test_files"
 PDF = TEST_FILES / "report.pdf"
 DOCUMENT = json.loads((TEST_FILES / "report.json").read_text())
+MARKDOWN = (TEST_FILES / "report.md").read_text()
 API = "https://api.switchfile.io"
 CONVERSION_ID = "0b8a7c1e-5d0f-4a51-9f39-2f7f4c1d9a10"
-DOWNLOAD_URL = f"{API}/files/2a6f8e1c/report.json?expires=1&signature=abc"
+DOWNLOAD_URL = f"{API}/files/2a6f8e1c/report.md?expires=1&signature=abc"
+JSON_URL = f"{API}/files/2a6f8e1c/report.json?expires=1&signature=abc"
 
 
-def conversion(status="finished", **extra):
+def conversion(status="finished", to="md", **extra):
+    url = DOWNLOAD_URL if to == "md" else JSON_URL
     body = {
         "id": CONVERSION_ID,
         "object": "conversion",
         "status": status,
         "progress": 100 if status == "finished" else 10,
-        "to": "json",
+        "to": to,
         "links": {"self": f"{API}/v1/conversions/{CONVERSION_ID}"},
     }
     if status == "finished":
         body.update(
-            download_url=DOWNLOAD_URL,
+            download_url=url,
             credits=1,
-            result={"files": [{"filename": "report.json", "size": 100, "url": DOWNLOAD_URL}], "incomplete": False},
+            result={"files": [{"filename": f"report.{to}", "size": 100, "url": url}], "incomplete": False},
         )
     body.update(extra)
     return body
@@ -65,6 +68,7 @@ class TestInit:
         converter = SwitchfileConverter()
         assert converter.api_key == Secret.from_env_var("SWITCHFILE_API_KEY")
         assert converter.api_base_url == API
+        assert converter.split_pages is False
         assert converter.table_documents is False
         assert converter.store is True
         assert converter.timeout == 300.0
@@ -77,6 +81,7 @@ class TestInit:
         converter = SwitchfileConverter(
             api_key=Secret.from_env_var("MY_KEY"),
             api_base_url="https://example.test/",
+            split_pages=True,
             table_documents=True,
             pages="1-3",
             ocr_language="deu",
@@ -91,6 +96,7 @@ class TestInit:
             "init_parameters": {
                 "api_key": {"type": "env_var", "env_vars": ["MY_KEY"], "strict": True},
                 "api_base_url": "https://example.test",
+                "split_pages": True,
                 "table_documents": True,
                 "pages": "1-3",
                 "ocr_language": "deu",
@@ -132,36 +138,51 @@ class TestRun:
                 matchers.query_param_matcher({"wait": "30"}),
             ],
         )
-        download = responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        download = responses.get(DOWNLOAD_URL, body=MARKDOWN.encode())
 
         result = SwitchfileConverter().run(sources=[PDF], meta={"collection": "reports"})
 
         assert convert.call_count == 1
+        assert len(responses.calls) == 2
         body = convert.calls[0].request.body
-        assert b'name="to"\r\n\r\njson' in body
+        assert b'name="to"\r\n\r\nmd' in body
         assert b'filename="report.pdf"' in body
         assert b"options" not in body
         assert "Authorization" not in download.calls[0].request.headers
 
         [document] = result["documents"]
         assert isinstance(document, Document)
-        pages = document.content.split("\f")
-        assert len(pages) == 2
-        assert pages[0].startswith("# Quarterly report")
-        assert "| North | 1,234.50 € |" in pages[0]
+        assert document.content == MARKDOWN
         assert document.meta == {
             "file_path": "report.pdf",
             "collection": "reports",
             "switchfile_conversion_id": CONVERSION_ID,
             "switchfile_credits": 1,
             "page_count": 2,
-            "ocr_pages": [2],
         }
+
+    @pytest.mark.parametrize("option", ["split_pages", "table_documents"])
+    @responses.activate
+    def test_json_only_when_requested(self, option):
+        convert = responses.post(f"{API}/v1/convert", json=conversion(to="json"))
+        responses.get(JSON_URL, json=DOCUMENT)
+
+        documents = SwitchfileConverter(**{option: True}).run(sources=[PDF])["documents"]
+
+        assert convert.call_count == 1
+        assert len(responses.calls) == 2
+        assert b'name="to"\r\n\r\njson' in convert.calls[0].request.body
+        pages = documents[0].content.split("\f")
+        assert len(pages) == 2
+        assert pages[0].startswith("# Quarterly report")
+        assert "| North | 1,234.50 € |" in pages[0]
+        assert documents[0].meta["page_count"] == 2
+        assert documents[0].meta["ocr_pages"] == [2]
 
     @responses.activate
     def test_sends_options(self):
         convert = responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         SwitchfileConverter(pages="1-2", ocr_language="deu+eng").run(sources=[PDF])
 
@@ -171,7 +192,7 @@ class TestRun:
     @responses.activate
     def test_bytestream_and_full_path(self):
         responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
         stream = ByteStream(data=PDF.read_bytes(), meta={"file_path": "/data/in/q3.pdf", "owner": "ops"})
 
         [document] = SwitchfileConverter(store_full_path=True).run(sources=[stream])["documents"]
@@ -183,7 +204,7 @@ class TestRun:
     @responses.activate
     def test_bytestream_without_name(self):
         responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         SwitchfileConverter().run(sources=[ByteStream(data=b"%PDF-1.4", mime_type="application/pdf")])
 
@@ -192,7 +213,7 @@ class TestRun:
     @responses.activate
     def test_meta_list_per_source(self):
         responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         documents = SwitchfileConverter().run(sources=[PDF, PDF], meta=[{"n": 1}, {"n": 2}])["documents"]
 
@@ -200,8 +221,8 @@ class TestRun:
 
     @responses.activate
     def test_table_documents(self):
-        responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.post(f"{API}/v1/convert", json=conversion(to="json"))
+        responses.get(JSON_URL, json=DOCUMENT)
 
         documents = SwitchfileConverter(table_documents=True).run(sources=[PDF])["documents"]
 
@@ -230,7 +251,7 @@ class TestRun:
             match=[matchers.query_param_matcher({"wait": "30"})],
         )
         responses.get(f"{API}/v1/conversions/{CONVERSION_ID}", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         [document] = SwitchfileConverter().run(sources=[PDF])["documents"]
 
@@ -247,7 +268,7 @@ class TestRun:
                 result={"files": [{"url": DOWNLOAD_URL}], "incomplete": True, "notes": ["Page 7 is missing."]},
             ),
         )
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         [document] = SwitchfileConverter().run(sources=[PDF])["documents"]
 
@@ -286,7 +307,7 @@ class TestRun:
             status=422,
         )
         responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         documents = SwitchfileConverter().run(sources=[PDF, PDF])["documents"]
 
@@ -320,7 +341,7 @@ class TestRun:
             headers={"Retry-After": "3"},
         )
         responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.get(DOWNLOAD_URL, body=MARKDOWN)
 
         documents = SwitchfileConverter().run(sources=[PDF])["documents"]
 
@@ -365,11 +386,11 @@ class TestRun:
 
     @responses.activate
     def test_result_that_is_not_a_document(self):
-        responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json={"hello": "world"})
+        responses.post(f"{API}/v1/convert", json=conversion(to="json"))
+        responses.get(JSON_URL, json={"hello": "world"})
 
         with pytest.raises(SwitchfileError) as excinfo:
-            SwitchfileConverter(raise_on_failure=True).run(sources=[PDF])
+            SwitchfileConverter(split_pages=True, raise_on_failure=True).run(sources=[PDF])
         assert excinfo.value.code == "INVALID_RESPONSE"
 
     def test_unreadable_source_is_skipped(self, tmp_path):
@@ -379,7 +400,7 @@ class TestRun:
     def test_without_storage(self):
         convert = responses.post(
             f"{API}/v1/convert",
-            json=DOCUMENT,
+            body=MARKDOWN.encode(),
             headers={
                 "X-Conversion-Id": CONVERSION_ID,
                 "X-Credits": "1",
@@ -393,10 +414,40 @@ class TestRun:
 
         assert convert.call_count == 1
         assert len(responses.calls) == 1
+        assert document.content == MARKDOWN
+        assert document.meta["page_count"] == 2
         assert document.meta["switchfile_conversion_id"] == CONVERSION_ID
         assert document.meta["switchfile_credits"] == 1
         assert document.meta["switchfile_incomplete"] is True
         assert document.meta["switchfile_notes"] == ["Page 3 was added as an image without text."]
+
+    @responses.activate
+    def test_without_storage_json(self):
+        convert = responses.post(f"{API}/v1/convert", json=DOCUMENT, headers={"X-Conversion-Id": CONVERSION_ID})
+
+        [document] = SwitchfileConverter(store=False, split_pages=True).run(sources=[PDF])["documents"]
+
+        assert b'name="to"\r\n\r\njson' in convert.calls[0].request.body
+        assert len(document.content.split("\f")) == 2
+
+    @responses.activate
+    def test_markdown_that_is_not_utf8(self):
+        responses.post(f"{API}/v1/convert", json=conversion())
+        responses.get(DOWNLOAD_URL, body=b"\xff\xfe broken")
+
+        with pytest.raises(SwitchfileError) as excinfo:
+            SwitchfileConverter(raise_on_failure=True).run(sources=[PDF])
+        assert excinfo.value.code == "INVALID_RESPONSE"
+
+    @responses.activate
+    def test_empty_markdown_warns(self, caplog):
+        responses.post(f"{API}/v1/convert", json=conversion())
+        responses.get(DOWNLOAD_URL, body="<!-- page 1 -->\n")
+
+        [document] = SwitchfileConverter().run(sources=[PDF])["documents"]
+
+        assert document.meta["page_count"] == 1
+        assert "No text found" in caplog.text
 
     @responses.activate
     def test_without_storage_error(self):
@@ -413,10 +464,10 @@ class TestRun:
     def test_in_a_pipeline(self):
         from haystack.components.preprocessors import DocumentSplitter
 
-        responses.post(f"{API}/v1/convert", json=conversion())
-        responses.get(DOWNLOAD_URL, json=DOCUMENT)
+        responses.post(f"{API}/v1/convert", json=conversion(to="json"))
+        responses.get(JSON_URL, json=DOCUMENT)
         pipeline = Pipeline()
-        pipeline.add_component("converter", SwitchfileConverter())
+        pipeline.add_component("converter", SwitchfileConverter(split_pages=True))
         pipeline.add_component("splitter", DocumentSplitter(split_by="page", split_length=1))
         pipeline.connect("converter", "splitter")
 

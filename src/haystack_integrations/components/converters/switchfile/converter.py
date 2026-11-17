@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from time import monotonic, sleep
@@ -28,6 +29,7 @@ _RETRY_STATUSES = {429, 503}
 _MAX_RETRIES = 3
 _MAX_WAIT = 30  # upper limit of ?wait in the simple API
 _CONNECT_TIMEOUT = 10.0
+_PAGE_MARK = re.compile(r"^<!-- page \d+ -->$", re.MULTILINE)
 
 try:
     _USER_AGENT = f"switchfile-haystack/{version('switchfile-haystack')}"
@@ -40,11 +42,15 @@ class SwitchfileConverter:
     """
     Converts PDF files to Markdown documents with the switchfile API.
 
-    Each source becomes one `Document` whose content is Markdown: headings, paragraphs, lists and tables as pipe
-    tables, in reading order. Pages are separated by a form feed (`\\f`), so `DocumentSplitter(split_by="page")`
-    works on the result. With `table_documents=True`, every table is also returned as a document of its own.
+    Each source becomes one `Document` whose content is the Markdown that the API returns for `to=md`: headings,
+    paragraphs, lists and tables as pipe tables, in reading order, with a `<!-- page N -->` line where each page starts.
 
-    Word, Excel and PowerPoint files work the same way. Any file that the API can convert to `json` is accepted.
+    With `split_pages=True` or `table_documents=True`, the component requests the structured `json` result instead and
+    renders the Markdown from it. Pages are then separated by a form feed (`\\f`) for
+    `DocumentSplitter(split_by="page")`, and `table_documents=True` also returns every table as a document of its own.
+    Either way, each file is converted once.
+
+    Word, Excel and PowerPoint files work the same way.
 
     ### Usage example
 
@@ -62,6 +68,7 @@ class SwitchfileConverter:
         *,
         api_key: Secret = Secret.from_env_var("SWITCHFILE_API_KEY"),
         api_base_url: str = DEFAULT_API_BASE_URL,
+        split_pages: bool = False,
         table_documents: bool = False,
         pages: str | None = None,
         ocr_language: str | None = None,
@@ -78,9 +85,14 @@ class SwitchfileConverter:
             Sandbox keys (`sf_test_...`) never use credits.
         :param api_base_url:
             Base URL of the API.
+        :param split_pages:
+            If `True`, pages are separated by a form feed (`\\f`) so that `DocumentSplitter(split_by="page")` keeps
+            page numbers. The component then requests the `json` result and renders the Markdown from it, which can
+            differ in detail from the `md` result.
         :param table_documents:
             If `True`, every table is also returned as a separate `Document` with its page number in the metadata,
-            in addition to the document of the whole file.
+            in addition to the document of the whole file. Like `split_pages`, this uses the `json` result and
+            renders the Markdown from it, with pages separated by a form feed.
         :param pages:
             Pages to convert, for example `"1-3,5"`. All pages by default.
         :param ocr_language:
@@ -104,6 +116,7 @@ class SwitchfileConverter:
             raise ValueError(msg)
         self.api_key = api_key
         self.api_base_url = api_base_url.rstrip("/")
+        self.split_pages = split_pages
         self.table_documents = table_documents
         self.pages = pages
         self.ocr_language = ocr_language
@@ -123,6 +136,7 @@ class SwitchfileConverter:
             self,
             api_key=self.api_key.to_dict(),
             api_base_url=self.api_base_url,
+            split_pages=self.split_pages,
             table_documents=self.table_documents,
             pages=self.pages,
             ocr_language=self.ocr_language,
@@ -184,22 +198,33 @@ class SwitchfileConverter:
                     continue
 
                 try:
-                    document_json, info = self._convert(session, api_key, bytestream)
+                    result, info = self._convert(session, api_key, bytestream)
                 except SwitchfileError as e:
                     if self.raise_on_failure or e.code in _ACCOUNT_ERRORS:
                         raise
                     logger.warning("Could not convert {source}. Skipping it. {error}", source=source, error=e)
                     continue
 
-                documents.extend(self._to_documents(document_json, info, {**bytestream.meta, **metadata}))
+                documents.extend(self._to_documents(result, info, {**bytestream.meta, **metadata}))
         return {"documents": documents}
 
+    @property
+    def _use_json(self) -> bool:
+        return self.split_pages or self.table_documents
+
     def _to_documents(
-        self, document_json: dict[str, Any], info: dict[str, Any], merged_meta: dict[str, Any]
+        self, result: dict[str, Any] | str, info: dict[str, Any], merged_meta: dict[str, Any]
     ) -> list[Document]:
         if not self.store_full_path and (file_path := merged_meta.get("file_path")):
             merged_meta["file_path"] = os.path.basename(file_path)
 
+        if isinstance(result, str):
+            meta = {**merged_meta, **info, "page_count": len(_PAGE_MARK.findall(result))}
+            if not _PAGE_MARK.sub("", result).strip():
+                logger.warning("No text found in {file}. Returning an empty document.", file=meta.get("file_path"))
+            return [Document(content=result, meta=meta)]
+
+        document_json = result
         pages = document_json.get("pages") or []
         meta = {**merged_meta, **info, "page_count": len(pages)}
         ocr_pages = [page.get("number") for page in pages if page.get("ocr")]
@@ -228,13 +253,14 @@ class SwitchfileConverter:
 
     def _convert(
         self, session: requests.Session, api_key: str, bytestream: ByteStream
-    ) -> tuple[dict[str, Any], dict[str, Any]]:
+    ) -> tuple[dict[str, Any] | str, dict[str, Any]]:
         deadline = monotonic() + self.timeout
         filename = os.path.basename(str(bytestream.meta.get("file_path") or "")) or "document.pdf"
         mime_type = bytestream.mime_type or (
             "application/pdf" if filename.lower().endswith(".pdf") else "application/octet-stream"
         )
-        form: dict[str, str] = {"to": "json"}
+        parse = _parse_document if self._use_json else _parse_markdown
+        form: dict[str, str] = {"to": "json" if self._use_json else "md"}
         options = {k: v for k, v in (("pages", self.pages), ("ocr_language", self.ocr_language)) if v}
         if options:
             form["options"] = json.dumps(options)
@@ -259,7 +285,7 @@ class SwitchfileConverter:
                 incomplete=response.headers.get("X-Incomplete") == "1",
                 notes=_parse_notes(notes),
             )
-            return _parse_document(response), info
+            return parse(response), info
 
         response = self._request(
             session,
@@ -307,7 +333,7 @@ class SwitchfileConverter:
             incomplete=bool(result.get("incomplete")),
             notes=result.get("notes") or [],
         )
-        return _parse_document(download), info
+        return parse(download), info
 
     def _request(
         self, session: requests.Session, method: str, path_or_url: str, deadline: float, **kwargs: Any
@@ -376,6 +402,13 @@ def _parse_document(response: requests.Response) -> dict[str, Any]:
     if not isinstance(document, dict) or not isinstance(document.get("pages"), list):
         raise SwitchfileError("INVALID_RESPONSE", "The result is not a switchfile document", details=document)
     return document
+
+
+def _parse_markdown(response: requests.Response) -> str:
+    try:
+        return response.content.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SwitchfileError("INVALID_RESPONSE", "The result is not UTF-8 Markdown") from e
 
 
 def _parse_notes(header: str | None) -> list[str]:

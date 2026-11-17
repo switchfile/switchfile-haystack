@@ -5,7 +5,7 @@ documents for your pipelines and agents. Tables arrive as Markdown tables, in re
 and can also be returned as documents of their own.
 
 - **`SwitchfileConverter`** takes file paths or `ByteStream` objects and returns one `Document` per file.
-- Scanned pages go through text recognition and are listed in the metadata.
+- Scanned pages go through text recognition.
 - Word, Excel and PowerPoint files work the same way.
 
 In the open [pdf-table-bench](https://github.com/switchfile/pdf-table-bench) benchmark, 97.2 % of the number cells
@@ -50,9 +50,16 @@ print(document.meta)
 #  'switchfile_conversion_id': '0b8a7c1e-...', 'switchfile_credits': 1, 'page_count': 12}
 ```
 
-The content is Markdown: headings, paragraphs, lists and tables. Running headers and footers are left out. Pages are
-separated by a form feed (`\f`), the same as the PDF converters that ship with Haystack, so
-`DocumentSplitter(split_by="page")` keeps page numbers.
+The content is the Markdown that the API returns for `md`, the same output the benchmark scores: headings,
+paragraphs, lists and tables. Running headers and footers are left out. Each page starts with a
+`<!-- page N -->` line.
+
+### Split by page
+
+Set `split_pages=True` to separate pages by a form feed (`\f`), the same as the PDF converters that ship with
+Haystack, so `DocumentSplitter(split_by="page")` keeps page numbers. The component then requests the structured
+`json` result and renders the Markdown from it. That Markdown can differ in detail from the `md` result. Each file is
+still converted once.
 
 ### In an indexing pipeline
 
@@ -66,7 +73,7 @@ from haystack_integrations.components.converters.switchfile import SwitchfileCon
 document_store = InMemoryDocumentStore()
 
 pipeline = Pipeline()
-pipeline.add_component("converter", SwitchfileConverter())
+pipeline.add_component("converter", SwitchfileConverter(split_pages=True))
 pipeline.add_component("splitter", DocumentSplitter(split_by="page", split_length=1))
 pipeline.add_component("writer", DocumentWriter(document_store=document_store))
 pipeline.connect("converter", "splitter")
@@ -78,7 +85,8 @@ pipeline.run({"converter": {"sources": ["report.pdf", "invoice.pdf"]}})
 ### Tables as separate documents
 
 With `table_documents=True`, every table is returned once more as a document of its own, after the document of the
-whole file. A table that runs over several pages is returned once, with the page where it starts:
+whole file. A table that runs over several pages is returned once, with the page where it starts. Like
+`split_pages`, this uses the `json` result, so the document of the whole file has its pages separated by a form feed:
 
 ```python
 converter = SwitchfileConverter(table_documents=True)
@@ -98,7 +106,8 @@ index twice: inside the full document and on their own.
 | Parameter | Default | |
 |---|---|---|
 | `api_key` | `Secret.from_env_var("SWITCHFILE_API_KEY")` | The API key |
-| `table_documents` | `False` | Also return every table as its own document |
+| `split_pages` | `False` | Separate pages by a form feed; the Markdown is then rendered from the `json` result |
+| `table_documents` | `False` | Also return every table as its own document; also renders from the `json` result |
 | `pages` | all | Pages to convert, for example `"1-3,5"` |
 | `ocr_language` | detected | Language of scanned pages, for example `"eng"`, `"deu"` or `"deu+eng"` |
 | `store` | `True` | `False` converts without storing the file or the result, see below |
@@ -123,7 +132,7 @@ to 50 MB and runs at most two requests per account at the same time. See
 |---|---|
 | `file_path` | File name, or the full path with `store_full_path=True` |
 | `page_count` | Number of pages |
-| `ocr_pages` | Page numbers whose text comes from text recognition, only when there are any |
+| `ocr_pages` | Page numbers whose text comes from text recognition, only with `split_pages` or `table_documents` and when there are any |
 | `switchfile_conversion_id` | ID of the conversion in your dashboard |
 | `switchfile_credits` | Credits the conversion used |
 | `switchfile_incomplete`, `switchfile_notes` | Set when some pages could not be converted; the notes name them |
