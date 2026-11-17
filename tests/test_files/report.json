@@ -1,0 +1,43 @@
+{
+  "schema": "switchfile.document",
+  "version": "1.0",
+  "source": { "format": "pdf" },
+  "pages": [
+    {
+      "kind": "page", "number": 1, "width": 595.3, "height": 841.9,
+      "blocks": [
+        { "type": "header", "text": "ACME Corp - confidential" },
+        { "type": "heading", "level": 1, "text": "Quarterly report" },
+        { "type": "paragraph", "text": "Revenue grew in every region." },
+        { "type": "table", "source": "ruled", "rows": 3, "cols": 2, "header_rows": 1,
+          "cells": [
+            { "row": 0, "col": 0, "text": "Region" },
+            { "row": 0, "col": 1, "text": "Revenue" },
+            { "row": 1, "col": 0, "text": "North" },
+            { "row": 1, "col": 1, "text": "1,234.50 €", "value": { "type": "currency", "value": 1234.5, "currency": "€" } },
+            { "row": 2, "col": 0, "text": "South | East" }
+          ] },
+        { "type": "footer", "text": "Page 1" }
+      ]
+    },
+    {
+      "kind": "page", "number": 2, "width": 595.3, "height": 841.9, "ocr": true,
+      "blocks": [
+        { "type": "heading", "level": 2, "text": "Next steps" },
+        { "type": "list", "items": [
+          { "level": 0, "text": "Hire" },
+          { "level": 1, "marker": "1.", "text": "Sales" }
+        ] },
+        { "type": "image", "number": 1 },
+        { "type": "table", "source": "layout", "rows": 2, "cols": 3,
+          "cells": [
+            { "row": 0, "col": 0, "text": "Q", "colspan": 2 },
+            { "row": 0, "col": 2, "text": "Total" },
+            { "row": 1, "col": 0, "text": "Q1" },
+            { "row": 1, "col": 1, "text": "Q2" },
+            { "row": 1, "col": 2, "text": "42", "value": { "type": "number", "value": 42 } }
+          ] }
+      ]
+    }
+  ]
+}

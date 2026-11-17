@@ -1,0 +1,74 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "switchfile-haystack"
+version = "0.1.0"
+description = "Haystack converter that turns PDFs into Markdown documents with tables, using the switchfile API"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+license-files = ["LICENSE"]
+keywords = ["haystack", "pdf", "tables", "markdown", "converter", "rag", "switchfile"]
+authors = [{ name = "Aura UG (haftungsbeschränkt)", email = "hello@switchfile.io" }]
+classifiers = [
+  "Development Status :: 4 - Beta",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python",
+  "Programming Language :: Python :: 3.10",
+  "Programming Language :: Python :: 3.11",
+  "Programming Language :: Python :: 3.12",
+  "Programming Language :: Python :: 3.13",
+  "Programming Language :: Python :: 3.14",
+  "Topic :: Text Processing",
+]
+dependencies = ["haystack-ai>=2.12.0", "requests>=2.28"]
+
+[project.urls]
+Homepage = "https://switchfile.io"
+Documentation = "https://github.com/switchfile/switchfile-haystack#readme"
+Source = "https://github.com/switchfile/switchfile-haystack"
+Issues = "https://github.com/switchfile/switchfile-haystack/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/haystack_integrations"]
+
+[tool.hatch.envs.default]
+installer = "uv"
+dependencies = ["ruff"]
+
+[tool.hatch.envs.default.scripts]
+fmt = "ruff check --fix {args}; ruff format {args}"
+fmt-check = "ruff check {args} && ruff format --check {args}"
+
+[tool.hatch.envs.test]
+dependencies = ["pytest", "responses", "mypy", "types-requests"]
+
+[tool.hatch.envs.test.scripts]
+unit = 'pytest -m "not integration" {args:tests}'
+integration = 'pytest -m "integration" {args:tests}'
+all = 'pytest {args:tests}'
+types = "mypy -p haystack_integrations.components.converters.switchfile {args}"
+
+[tool.mypy]
+check_untyped_defs = true
+disallow_incomplete_defs = true
+ignore_missing_imports = true
+
+[tool.ruff]
+line-length = 120
+
+[tool.ruff.lint]
+select = ["A", "ANN", "ARG", "B", "D102", "D103", "D205", "D209", "D213", "D417", "E", "F", "I", "N", "PLE", "PLW", "RUF", "S", "T", "TID", "UP", "W"]
+ignore = ["B008", "ANN401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["haystack_integrations"]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**/*" = ["PLR2004", "S101", "D", "ANN"]
+
+[tool.pytest.ini_options]
+addopts = "--strict-markers"
+markers = ["integration: calls the live switchfile API with a sandbox key"]
